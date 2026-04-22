@@ -4,7 +4,6 @@ import android.Manifest;
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.ContentUris;
-import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.net.Uri;
@@ -12,8 +11,6 @@ import android.os.Build;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.Log;
-
-import androidx.activity.result.ActivityResult;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -24,7 +21,6 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
-import com.getcapacitor.annotation.ActivityCallback;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -45,20 +41,16 @@ import java.util.List;
         @Permission(
             alias = "storage",
             strings = { Manifest.permission.READ_EXTERNAL_STORAGE }
-        ),
-        @Permission(
-            alias = "writeStorage",
-            strings = { Manifest.permission.WRITE_EXTERNAL_STORAGE }
         )
     }
 )
 public class MediaScannerPlugin extends Plugin {
 
     private static final String TAG = "MediaScanner";
-    private static final int DELETE_REQUEST_CODE = 1001;
+    private static final int DELETE_REQUEST_CODE = 5001;
 
-    private PluginCall pendingDeleteCall = null;
-    private List<Uri> pendingDeleteUris = null;
+    // Saved call for async operations (activity results)
+    private PluginCall savedDeleteCall = null;
 
     @PluginMethod
     public void checkPermissions(PluginCall call) {
@@ -102,6 +94,10 @@ public class MediaScannerPlugin extends Plugin {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════
+    // SCAN PHOTOS
+    // ═══════════════════════════════════════════════════════════
+
     @PluginMethod
     public void scanPhotos(PluginCall call) {
         try {
@@ -128,12 +124,7 @@ public class MediaScannerPlugin extends Plugin {
     }
 
     private void scanImages(ContentResolver resolver, JSArray photos) {
-        Uri collection;
-        if (Build.VERSION.SDK_INT >= 29) {
-            collection = MediaStore.Images.Media.getContentUri("external");
-        } else {
-            collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-        }
+        Uri collection = MediaStore.Images.Media.getContentUri("external");
 
         String[] projection = {
             MediaStore.Images.Media._ID,
@@ -173,7 +164,6 @@ public class MediaScannerPlugin extends Plugin {
                     String filePath = cursor.getString(dataCol);
                     long dateTaken = cursor.getLong(dateTakenCol);
                     String mimeType = cursor.getString(mimeCol);
-
                     long dateMs = dateTaken > 0 ? dateTaken : (dateModified * 1000);
 
                     Uri contentUri = ContentUris.withAppendedId(
@@ -190,7 +180,6 @@ public class MediaScannerPlugin extends Plugin {
                     photo.put("contentUri", contentUri.toString());
                     photo.put("type", "image");
                     photo.put("mimeType", mimeType != null ? mimeType : "image/jpeg");
-
                     photos.put(photo);
                 } catch (Exception e) {
                     Log.w(TAG, "Error reading image row", e);
@@ -202,12 +191,7 @@ public class MediaScannerPlugin extends Plugin {
     }
 
     private void scanVideos(ContentResolver resolver, JSArray photos) {
-        Uri collection;
-        if (Build.VERSION.SDK_INT >= 29) {
-            collection = MediaStore.Video.Media.getContentUri("external");
-        } else {
-            collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
-        }
+        Uri collection = MediaStore.Video.Media.getContentUri("external");
 
         String[] projection = {
             MediaStore.Video.Media._ID,
@@ -250,7 +234,6 @@ public class MediaScannerPlugin extends Plugin {
                     long dateTaken = cursor.getLong(dateTakenCol);
                     String mimeType = cursor.getString(mimeCol);
                     long duration = cursor.getLong(durationCol);
-
                     long dateMs = dateTaken > 0 ? dateTaken : (dateModified * 1000);
 
                     Uri contentUri = ContentUris.withAppendedId(
@@ -268,7 +251,6 @@ public class MediaScannerPlugin extends Plugin {
                     video.put("type", "video");
                     video.put("mimeType", mimeType != null ? mimeType : "video/mp4");
                     video.put("duration", duration);
-
                     photos.put(video);
                 } catch (Exception e) {
                     Log.w(TAG, "Error reading video row", e);
@@ -283,6 +265,11 @@ public class MediaScannerPlugin extends Plugin {
     // REAL FILE DELETION
     // ═══════════════════════════════════════════════════════════
 
+    /**
+     * Delete photos from device storage.
+     * Android 11+: Uses MediaStore.createDeleteRequest() with system consent dialog.
+     * Android 10-: Uses ContentResolver.delete() directly.
+     */
     @PluginMethod
     public void deletePhotos(PluginCall call) {
         JSArray contentUrisArray = call.getArray("contentUris");
@@ -303,11 +290,43 @@ public class MediaScannerPlugin extends Plugin {
                 urisToDelete.add(Uri.parse(uriStr));
             }
 
+            Log.i(TAG, "deletePhotos called with " + urisToDelete.size() + " URIs, API level: " + Build.VERSION.SDK_INT);
+
             if (Build.VERSION.SDK_INT >= 30) {
-                // Android 11+: Use createDeleteRequest for user consent dialog
-                deleteWithUserConsent(call, urisToDelete);
+                // Android 11+: Use createDeleteRequest() - MUST save call and run on UI thread
+                call.save(); // CRITICAL: Prevent Capacitor from timing out the call
+                savedDeleteCall = call;
+
+                getActivity().runOnUiThread(() -> {
+                    try {
+                        android.app.PendingIntent deletePendingIntent =
+                            MediaStore.createDeleteRequest(
+                                getContext().getContentResolver(),
+                                urisToDelete
+                            );
+
+                        Log.i(TAG, "createDeleteRequest succeeded, launching intent sender");
+
+                        getActivity().startIntentSenderForResult(
+                            deletePendingIntent.getIntentSender(),
+                            DELETE_REQUEST_CODE,
+                            null, 0, 0, 0
+                        );
+                    } catch (Exception e) {
+                        Log.e(TAG, "createDeleteRequest failed on UI thread", e);
+                        // Resolve with failed status
+                        if (savedDeleteCall != null) {
+                            JSObject result = new JSObject();
+                            result.put("deleted", 0);
+                            result.put("failed", urisToDelete.size());
+                            result.put("error", e.getMessage());
+                            savedDeleteCall.resolve(result);
+                            savedDeleteCall = null;
+                        }
+                    }
+                });
             } else {
-                // Android 10 and below: Delete directly with ContentResolver
+                // Android 10 and below: Delete directly via ContentResolver
                 deleteDirectly(call, urisToDelete);
             }
         } catch (Exception e) {
@@ -316,68 +335,37 @@ public class MediaScannerPlugin extends Plugin {
         }
     }
 
-    /**
-     * Android 11+ (API 30+): Use MediaStore.createDeleteRequest()
-     * This shows a system dialog asking the user to confirm deletion.
-     * No special permissions needed.
-     */
-    private void deleteWithUserConsent(PluginCall call, List<Uri> urisToDelete) {
-        try {
-            pendingDeleteCall = call;
-            pendingDeleteUris = urisToDelete;
-
-            if (Build.VERSION.SDK_INT >= 30) {
-                android.app.PendingIntent deletePendingIntent =
-                    MediaStore.createDeleteRequest(
-                        getContext().getContentResolver(),
-                        urisToDelete
-                    );
-
-                // Start the intent sender from the PendingIntent
-                getActivity().startIntentSenderForResult(
-                    deletePendingIntent.getIntentSender(),
-                    DELETE_REQUEST_CODE,
-                    null, 0, 0, 0
-                );
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "createDeleteRequest failed", e);
-            // Fallback to direct deletion
-            deleteDirectly(call, urisToDelete);
-        }
-    }
-
     // Handle the result from the system delete confirmation dialog
     @Override
     protected void handleOnActivityResult(int requestCode, int resultCode, android.content.Intent data) {
-        if (requestCode == DELETE_REQUEST_CODE && pendingDeleteCall != null) {
-            int deleted = 0;
-            int failed = 0;
+        Log.i(TAG, "handleOnActivityResult: requestCode=" + requestCode + ", resultCode=" + resultCode);
 
+        if (requestCode == DELETE_REQUEST_CODE && savedDeleteCall != null) {
             if (resultCode == Activity.RESULT_OK) {
-                // User confirmed deletion - files are already deleted by the system
-                deleted = pendingDeleteUris != null ? pendingDeleteUris.size() : 0;
-                Log.i(TAG, "User confirmed deletion of " + deleted + " files");
-            } else {
-                // User cancelled or denied
-                failed = pendingDeleteUris != null ? pendingDeleteUris.size() : 0;
-                Log.i(TAG, "User cancelled deletion");
-            }
+                // User confirmed - files are deleted by the system
+                Log.i(TAG, "User confirmed deletion - files deleted from device");
 
-            JSObject result = new JSObject();
-            result.put("deleted", deleted);
-            result.put("failed", failed);
-            result.put("userCancelled", resultCode != Activity.RESULT_OK);
-            pendingDeleteCall.resolve(result);
-            pendingDeleteCall = null;
-            pendingDeleteUris = null;
+                JSObject result = new JSObject();
+                result.put("deleted", 1); // Success
+                result.put("failed", 0);
+                result.put("userCancelled", false);
+                savedDeleteCall.resolve(result);
+            } else {
+                // User cancelled the system dialog
+                Log.i(TAG, "User cancelled system delete dialog");
+
+                JSObject result = new JSObject();
+                result.put("deleted", 0);
+                result.put("failed", 1);
+                result.put("userCancelled", true);
+                savedDeleteCall.resolve(result);
+            }
+            savedDeleteCall = null;
         }
     }
 
     /**
-     * Android 10 and below: Delete directly via ContentResolver
-     * Requires WRITE_EXTERNAL_STORAGE on Android 9 and below.
-     * On Android 10 (API 29), may work for app-created files only.
+     * Android 10 and below: Delete directly via ContentResolver + file system.
      */
     private void deleteDirectly(PluginCall call, List<Uri> urisToDelete) {
         bridge.execute(() -> {
@@ -387,30 +375,32 @@ public class MediaScannerPlugin extends Plugin {
 
             for (Uri uri : urisToDelete) {
                 try {
-                    // First try to delete the actual file
+                    // First, try to delete the actual file from storage
                     String filePath = getFilePathFromUri(uri);
+                    boolean fileDeleted = false;
+
                     if (filePath != null) {
                         File file = new File(filePath);
                         if (file.exists()) {
-                            file.delete();
+                            fileDeleted = file.delete();
+                            Log.i(TAG, "File deletion " + (fileDeleted ? "succeeded" : "failed") + ": " + filePath);
                         }
                     }
 
-                    // Then remove from MediaStore
+                    // Then remove from MediaStore database
                     int rows = resolver.delete(uri, null, null);
-                    if (rows > 0) {
+                    if (rows > 0 || fileDeleted) {
                         deleted++;
-                        Log.i(TAG, "Deleted: " + uri);
+                        Log.i(TAG, "Deleted from MediaStore: " + uri);
                     } else {
                         failed++;
-                        Log.w(TAG, "No rows deleted for: " + uri);
+                        Log.w(TAG, "Failed to delete: " + uri + " (rows=" + rows + ", fileDeleted=" + fileDeleted + ")");
                     }
                 } catch (SecurityException e) {
-                    // On Android 10, might get SecurityException for non-app files
-                    Log.w(TAG, "SecurityException deleting " + uri + ": " + e.getMessage());
+                    Log.w(TAG, "SecurityException for " + uri + ": " + e.getMessage());
                     failed++;
                 } catch (Exception e) {
-                    Log.w(TAG, "Failed to delete " + uri + ": " + e.getMessage());
+                    Log.w(TAG, "Exception deleting " + uri + ": " + e.getMessage());
                     failed++;
                 }
             }
@@ -419,7 +409,7 @@ public class MediaScannerPlugin extends Plugin {
             final int finalFailed = failed;
 
             // Return result on main thread
-            bridge.executeOnMainThread(() -> {
+            getActivity().runOnUiThread(() -> {
                 JSObject result = new JSObject();
                 result.put("deleted", finalDeleted);
                 result.put("failed", finalFailed);

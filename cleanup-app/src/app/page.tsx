@@ -581,43 +581,66 @@ export default function CleanupApp() {
     const ids = Array.from(store.selectedPhotos)
     if (ids.length === 0) return
 
-    // Get contentUris for native deletion
+    // Get contentUris for native deletion BEFORE removing from state
     const photosToDelete = store.photos.filter(p => ids.includes(p.id))
     const contentUris = photosToDelete.map(p => p.contentUri).filter(Boolean) as string[]
 
-    // Remove from UI immediately for instant feedback
-    store.deletePhotos(ids)
-    store.clearSelection()
     setShowDeleteConfirm(false)
-    setSelectionMode(false)
 
-    // Actually delete files from device
+    // Actually delete files from device FIRST (before UI update)
     if (store.isNative && contentUris.length > 0) {
       try {
         const { registerPlugin } = await import('@capacitor/core')
         const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
         const result = await MediaScanner.deletePhotos({ contentUris })
-        console.log(`Real delete: ${result.deleted} deleted, ${result.failed} failed`)
+
+        if (result.userCancelled) {
+          // User cancelled the system dialog - don't remove from UI
+          console.log('User cancelled system delete dialog')
+          return
+        }
+
+        if (result.deleted > 0) {
+          // Files were actually deleted - now remove from UI
+          store.deletePhotos(ids)
+          store.clearSelection()
+          setSelectionMode(false)
+        }
       } catch (err) {
         console.error('Native delete failed:', err)
+        // Still remove from UI even if native delete fails
+        store.deletePhotos(ids)
+        store.clearSelection()
+        setSelectionMode(false)
       }
+    } else {
+      // Web fallback - just remove from state
+      store.deletePhotos(ids)
+      store.clearSelection()
+      setSelectionMode(false)
     }
   }, [store])
 
   // ─── Delete Single Photo (real deletion) ───────────────────
   const deleteSinglePhoto = useCallback(async (photo: Photo) => {
-    // Remove from UI immediately
-    store.deletePhotos([photo.id])
-
-    // Actually delete from device
     if (store.isNative && photo.contentUri) {
       try {
         const { registerPlugin } = await import('@capacitor/core')
         const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
-        await MediaScanner.deletePhotos({ contentUris: [photo.contentUri] })
+        const result = await MediaScanner.deletePhotos({ contentUris: [photo.contentUri] })
+
+        if (result.userCancelled) return // Don't remove from UI
+
+        // Actually deleted - remove from UI
+        if (result.deleted > 0) {
+          store.deletePhotos([photo.id])
+        }
       } catch (err) {
         console.error('Native delete failed:', err)
+        store.deletePhotos([photo.id]) // Fallback
       }
+    } else {
+      store.deletePhotos([photo.id])
     }
   }, [store])
 
@@ -627,17 +650,21 @@ export default function CleanupApp() {
       const photos = store.getPhotosByCategory(store.activeCategory || 'duplicates')
       const currentPhoto = photos[swipeIndex]
       if (currentPhoto) {
-        // Remove from UI
-        store.deletePhotos([currentPhoto.id])
-        // Actually delete from device
+        // Delete from device first
         if (store.isNative && currentPhoto.contentUri) {
           try {
             const { registerPlugin } = await import('@capacitor/core')
             const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
-            await MediaScanner.deletePhotos({ contentUris: [currentPhoto.contentUri] })
+            const result = await MediaScanner.deletePhotos({ contentUris: [currentPhoto.contentUri] })
+            if (!result.userCancelled && result.deleted > 0) {
+              store.deletePhotos([currentPhoto.id])
+            }
           } catch (err) {
             console.error('Native delete failed:', err)
+            store.deletePhotos([currentPhoto.id])
           }
+        } else {
+          store.deletePhotos([currentPhoto.id])
         }
       }
     }
@@ -931,15 +958,24 @@ export default function CleanupApp() {
               const ids = Array.from(store.selectedPhotos)
               const photosToDelete = store.photos.filter(p => ids.includes(p.id))
               const contentUris = photosToDelete.map(p => p.contentUri).filter(Boolean) as string[]
-              store.deletePhotos(ids)
-              store.clearSelection()
               setShowDeleteConfirm(false)
               if (store.isNative && contentUris.length > 0) {
                 try {
                   const { registerPlugin } = await import('@capacitor/core')
                   const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
-                  await MediaScanner.deletePhotos({ contentUris })
-                } catch (err) { console.error('Native delete failed:', err) }
+                  const result = await MediaScanner.deletePhotos({ contentUris })
+                  if (!result.userCancelled && result.deleted > 0) {
+                    store.deletePhotos(ids)
+                    store.clearSelection()
+                  }
+                } catch (err) {
+                  console.error('Native delete failed:', err)
+                  store.deletePhotos(ids)
+                  store.clearSelection()
+                }
+              } else {
+                store.deletePhotos(ids)
+                store.clearSelection()
               }
             }}
             onCancel={() => { store.clearSelection(); setShowDeleteConfirm(false) }} />}
