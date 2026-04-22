@@ -63,7 +63,8 @@ public class MediaScannerPlugin extends Plugin {
         }
 
         if (Build.VERSION.SDK_INT >= 33) {
-            requestPermissionForAlias("mediaImages", call, "permissionCallback");
+            // Android 13+: Request BOTH media permissions at once
+            requestPermissionForAliases(new String[]{"mediaImages", "mediaVideo"}, call, "permissionCallback");
         } else {
             requestPermissionForAlias("storage", call, "permissionCallback");
         }
@@ -79,8 +80,11 @@ public class MediaScannerPlugin extends Plugin {
 
     private boolean hasStoragePermission() {
         if (Build.VERSION.SDK_INT >= 33) {
-            return getPermissionState("mediaImages") == PermissionState.GRANTED
-                && getPermissionState("mediaVideo") == PermissionState.GRANTED;
+            // On Android 13+, accept if at least images permission is granted
+            // (video permission might be denied but we can still scan photos)
+            boolean imagesGranted = getPermissionState("mediaImages") == PermissionState.GRANTED;
+            boolean videoGranted = getPermissionState("mediaVideo") == PermissionState.GRANTED;
+            return imagesGranted || videoGranted;
         } else {
             return getPermissionState("storage") == PermissionState.GRANTED;
         }
