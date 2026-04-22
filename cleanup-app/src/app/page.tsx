@@ -49,6 +49,7 @@ interface MediaScannerPlugin {
   scanPhotos(): Promise<{ photos: NativePhoto[]; totalCount: number }>
   getThumbnail(options: { contentUri: string; size?: number }): Promise<{ thumbnail: string }>
   getThumbnailsBatch(options: { contentUris: string[]; size?: number }): Promise<{ thumbnails: Array<{ contentUri: string; thumbnail: string }> }>
+  deletePhotos(options: { contentUris: string[] }): Promise<{ deleted: number; failed: number; userCancelled?: boolean }>
 }
 
 // ─── Delete Confirmation Dialog ───────────────────────────────
@@ -576,19 +577,69 @@ export default function CleanupApp() {
     setShowDeleteConfirm(true)
   }, [store.selectedPhotos])
 
-  const confirmDelete = useCallback(() => {
-    store.deletePhotos(Array.from(store.selectedPhotos))
+  const confirmDelete = useCallback(async () => {
+    const ids = Array.from(store.selectedPhotos)
+    if (ids.length === 0) return
+
+    // Get contentUris for native deletion
+    const photosToDelete = store.photos.filter(p => ids.includes(p.id))
+    const contentUris = photosToDelete.map(p => p.contentUri).filter(Boolean) as string[]
+
+    // Remove from UI immediately for instant feedback
+    store.deletePhotos(ids)
     store.clearSelection()
     setShowDeleteConfirm(false)
     setSelectionMode(false)
+
+    // Actually delete files from device
+    if (store.isNative && contentUris.length > 0) {
+      try {
+        const { registerPlugin } = await import('@capacitor/core')
+        const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
+        const result = await MediaScanner.deletePhotos({ contentUris })
+        console.log(`Real delete: ${result.deleted} deleted, ${result.failed} failed`)
+      } catch (err) {
+        console.error('Native delete failed:', err)
+      }
+    }
+  }, [store])
+
+  // ─── Delete Single Photo (real deletion) ───────────────────
+  const deleteSinglePhoto = useCallback(async (photo: Photo) => {
+    // Remove from UI immediately
+    store.deletePhotos([photo.id])
+
+    // Actually delete from device
+    if (store.isNative && photo.contentUri) {
+      try {
+        const { registerPlugin } = await import('@capacitor/core')
+        const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
+        await MediaScanner.deletePhotos({ contentUris: [photo.contentUri] })
+      } catch (err) {
+        console.error('Native delete failed:', err)
+      }
+    }
   }, [store])
 
   // ─── Swipe Handlers ─────────────────────────────────────
-  const handleSwipe = useCallback((direction: 'left' | 'right') => {
+  const handleSwipe = useCallback(async (direction: 'left' | 'right') => {
     if (direction === 'left') {
       const photos = store.getPhotosByCategory(store.activeCategory || 'duplicates')
       const currentPhoto = photos[swipeIndex]
-      if (currentPhoto) store.deletePhotos([currentPhoto.id])
+      if (currentPhoto) {
+        // Remove from UI
+        store.deletePhotos([currentPhoto.id])
+        // Actually delete from device
+        if (store.isNative && currentPhoto.contentUri) {
+          try {
+            const { registerPlugin } = await import('@capacitor/core')
+            const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
+            await MediaScanner.deletePhotos({ contentUris: [currentPhoto.contentUri] })
+          } catch (err) {
+            console.error('Native delete failed:', err)
+          }
+        }
+      }
     }
     setSwipeIndex(prev => prev + 1)
   }, [store, swipeIndex])
@@ -742,7 +793,7 @@ export default function CleanupApp() {
               <AnimatePresence mode="popLayout">
                 {categoryPhotos.map((photo) => (
                   <PhotoCard key={photo.id} photo={photo} isSelected={store.selectedPhotos.has(photo.id)}
-                    onToggle={() => store.toggleSelect(photo.id)} onDelete={() => store.deletePhotos([photo.id])}
+                    onToggle={() => store.toggleSelect(photo.id)} onDelete={() => deleteSinglePhoto(photo)}
                     selectionMode={selectionMode} />
                 ))}
               </AnimatePresence>
@@ -876,7 +927,21 @@ export default function CleanupApp() {
         </div>
         <AnimatePresence>
           {showDeleteConfirm && <DeleteConfirmDialog count={store.selectedPhotos.size}
-            onConfirm={() => { store.deletePhotos(Array.from(store.selectedPhotos)); store.clearSelection(); setShowDeleteConfirm(false) }}
+            onConfirm={async () => {
+              const ids = Array.from(store.selectedPhotos)
+              const photosToDelete = store.photos.filter(p => ids.includes(p.id))
+              const contentUris = photosToDelete.map(p => p.contentUri).filter(Boolean) as string[]
+              store.deletePhotos(ids)
+              store.clearSelection()
+              setShowDeleteConfirm(false)
+              if (store.isNative && contentUris.length > 0) {
+                try {
+                  const { registerPlugin } = await import('@capacitor/core')
+                  const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
+                  await MediaScanner.deletePhotos({ contentUris })
+                } catch (err) { console.error('Native delete failed:', err) }
+              }
+            }}
             onCancel={() => { store.clearSelection(); setShowDeleteConfirm(false) }} />}
         </AnimatePresence>
       </div>

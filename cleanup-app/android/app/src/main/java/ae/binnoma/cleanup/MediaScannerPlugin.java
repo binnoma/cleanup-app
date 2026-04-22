@@ -1,8 +1,10 @@
 package ae.binnoma.cleanup;
 
 import android.Manifest;
+import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.ContentUris;
+import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.net.Uri;
@@ -10,6 +12,8 @@ import android.os.Build;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.Log;
+
+import androidx.activity.result.ActivityResult;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -20,8 +24,11 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
+import com.getcapacitor.annotation.ActivityCallback;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 
 @CapacitorPlugin(
@@ -38,12 +45,20 @@ import java.util.List;
         @Permission(
             alias = "storage",
             strings = { Manifest.permission.READ_EXTERNAL_STORAGE }
+        ),
+        @Permission(
+            alias = "writeStorage",
+            strings = { Manifest.permission.WRITE_EXTERNAL_STORAGE }
         )
     }
 )
 public class MediaScannerPlugin extends Plugin {
 
     private static final String TAG = "MediaScanner";
+    private static final int DELETE_REQUEST_CODE = 1001;
+
+    private PluginCall pendingDeleteCall = null;
+    private List<Uri> pendingDeleteUris = null;
 
     @PluginMethod
     public void checkPermissions(PluginCall call) {
@@ -63,7 +78,6 @@ public class MediaScannerPlugin extends Plugin {
         }
 
         if (Build.VERSION.SDK_INT >= 33) {
-            // Android 13+: Request BOTH media permissions at once
             requestPermissionForAliases(new String[]{"mediaImages", "mediaVideo"}, call, "permissionCallback");
         } else {
             requestPermissionForAlias("storage", call, "permissionCallback");
@@ -80,8 +94,6 @@ public class MediaScannerPlugin extends Plugin {
 
     private boolean hasStoragePermission() {
         if (Build.VERSION.SDK_INT >= 33) {
-            // On Android 13+, accept if at least images permission is granted
-            // (video permission might be denied but we can still scan photos)
             boolean imagesGranted = getPermissionState("mediaImages") == PermissionState.GRANTED;
             boolean videoGranted = getPermissionState("mediaVideo") == PermissionState.GRANTED;
             return imagesGranted || videoGranted;
@@ -267,6 +279,176 @@ public class MediaScannerPlugin extends Plugin {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════
+    // REAL FILE DELETION
+    // ═══════════════════════════════════════════════════════════
+
+    @PluginMethod
+    public void deletePhotos(PluginCall call) {
+        JSArray contentUrisArray = call.getArray("contentUris");
+
+        try {
+            List<Object> uriStrings = contentUrisArray.toList();
+            if (uriStrings.isEmpty()) {
+                JSObject result = new JSObject();
+                result.put("deleted", 0);
+                result.put("failed", 0);
+                call.resolve(result);
+                return;
+            }
+
+            List<Uri> urisToDelete = new ArrayList<>();
+            for (Object obj : uriStrings) {
+                String uriStr = (String) obj;
+                urisToDelete.add(Uri.parse(uriStr));
+            }
+
+            if (Build.VERSION.SDK_INT >= 30) {
+                // Android 11+: Use createDeleteRequest for user consent dialog
+                deleteWithUserConsent(call, urisToDelete);
+            } else {
+                // Android 10 and below: Delete directly with ContentResolver
+                deleteDirectly(call, urisToDelete);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Delete photos failed", e);
+            call.reject("Delete failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Android 11+ (API 30+): Use MediaStore.createDeleteRequest()
+     * This shows a system dialog asking the user to confirm deletion.
+     * No special permissions needed.
+     */
+    private void deleteWithUserConsent(PluginCall call, List<Uri> urisToDelete) {
+        try {
+            pendingDeleteCall = call;
+            pendingDeleteUris = urisToDelete;
+
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.app.PendingIntent deletePendingIntent =
+                    MediaStore.createDeleteRequest(
+                        getContext().getContentResolver(),
+                        urisToDelete
+                    );
+
+                // Start the intent sender from the PendingIntent
+                getActivity().startIntentSenderForResult(
+                    deletePendingIntent.getIntentSender(),
+                    DELETE_REQUEST_CODE,
+                    null, 0, 0, 0
+                );
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "createDeleteRequest failed", e);
+            // Fallback to direct deletion
+            deleteDirectly(call, urisToDelete);
+        }
+    }
+
+    // Handle the result from the system delete confirmation dialog
+    @Override
+    protected void handleOnActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+        if (requestCode == DELETE_REQUEST_CODE && pendingDeleteCall != null) {
+            int deleted = 0;
+            int failed = 0;
+
+            if (resultCode == Activity.RESULT_OK) {
+                // User confirmed deletion - files are already deleted by the system
+                deleted = pendingDeleteUris != null ? pendingDeleteUris.size() : 0;
+                Log.i(TAG, "User confirmed deletion of " + deleted + " files");
+            } else {
+                // User cancelled or denied
+                failed = pendingDeleteUris != null ? pendingDeleteUris.size() : 0;
+                Log.i(TAG, "User cancelled deletion");
+            }
+
+            JSObject result = new JSObject();
+            result.put("deleted", deleted);
+            result.put("failed", failed);
+            result.put("userCancelled", resultCode != Activity.RESULT_OK);
+            pendingDeleteCall.resolve(result);
+            pendingDeleteCall = null;
+            pendingDeleteUris = null;
+        }
+    }
+
+    /**
+     * Android 10 and below: Delete directly via ContentResolver
+     * Requires WRITE_EXTERNAL_STORAGE on Android 9 and below.
+     * On Android 10 (API 29), may work for app-created files only.
+     */
+    private void deleteDirectly(PluginCall call, List<Uri> urisToDelete) {
+        bridge.execute(() -> {
+            int deleted = 0;
+            int failed = 0;
+            ContentResolver resolver = getContext().getContentResolver();
+
+            for (Uri uri : urisToDelete) {
+                try {
+                    // First try to delete the actual file
+                    String filePath = getFilePathFromUri(uri);
+                    if (filePath != null) {
+                        File file = new File(filePath);
+                        if (file.exists()) {
+                            file.delete();
+                        }
+                    }
+
+                    // Then remove from MediaStore
+                    int rows = resolver.delete(uri, null, null);
+                    if (rows > 0) {
+                        deleted++;
+                        Log.i(TAG, "Deleted: " + uri);
+                    } else {
+                        failed++;
+                        Log.w(TAG, "No rows deleted for: " + uri);
+                    }
+                } catch (SecurityException e) {
+                    // On Android 10, might get SecurityException for non-app files
+                    Log.w(TAG, "SecurityException deleting " + uri + ": " + e.getMessage());
+                    failed++;
+                } catch (Exception e) {
+                    Log.w(TAG, "Failed to delete " + uri + ": " + e.getMessage());
+                    failed++;
+                }
+            }
+
+            final int finalDeleted = deleted;
+            final int finalFailed = failed;
+
+            // Return result on main thread
+            bridge.executeOnMainThread(() -> {
+                JSObject result = new JSObject();
+                result.put("deleted", finalDeleted);
+                result.put("failed", finalFailed);
+                result.put("userCancelled", false);
+                call.resolve(result);
+            });
+        });
+    }
+
+    /**
+     * Get file path from content URI for direct file deletion
+     */
+    private String getFilePathFromUri(Uri uri) {
+        String[] projection = { MediaStore.MediaColumns.DATA };
+        try (Cursor cursor = getContext().getContentResolver().query(uri, projection, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int dataIndex = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATA);
+                return cursor.getString(dataIndex);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not get file path for URI: " + uri, e);
+        }
+        return null;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // THUMBNAIL GENERATION
+    // ═══════════════════════════════════════════════════════════
+
     @PluginMethod
     public void getThumbnail(PluginCall call) {
         String contentUriStr = call.getString("contentUri", "");
@@ -277,18 +459,15 @@ public class MediaScannerPlugin extends Plugin {
             return;
         }
 
-        // Run on background thread to avoid blocking UI
         bridge.execute(() -> {
             try {
                 Uri uri = Uri.parse(contentUriStr);
                 Bitmap thumbnail = null;
 
                 if (Build.VERSION.SDK_INT >= 29) {
-                    // Android 10+: Use loadThumbnail (fast, cached by system)
                     android.util.Size size = new android.util.Size(thumbSize, thumbSize);
                     thumbnail = getContext().getContentResolver().loadThumbnail(uri, size, null);
                 } else {
-                    // Older devices: Use MediaStore Thumbnails API
                     try {
                         long id = ContentUris.parseId(uri);
                         thumbnail = MediaStore.Images.Thumbnails.getThumbnail(
@@ -296,7 +475,6 @@ public class MediaScannerPlugin extends Plugin {
                             MediaStore.Images.Thumbnails.MINI_KIND, null);
 
                         if (thumbnail != null) {
-                            // Scale to desired size
                             double scale = Math.min(
                                 (double) thumbSize / thumbnail.getWidth(),
                                 (double) thumbSize / thumbnail.getHeight());
