@@ -20,7 +20,7 @@
 
 | شاشة الترحيب | لوحة التحكم | عرض الفئات |
 |:---:|:---:|:---:|
-| <img src="public/screenshot-welcome.png" alt="Welcome Screen" width="250" /> | <img src="public/screenshot-home.png" alt="Home Dashboard" width="250" /> | <img src="public/screenshot-category.png" alt="Category Gallery" width="250" /> |
+| ![Welcome Screen](public/screenshot-welcome.png) | ![Home Dashboard](public/screenshot-home.png) | ![Category Gallery](public/screenshot-category.png) |
 
 </div>
 
@@ -109,9 +109,9 @@ cleanup-app/
 interface PhotoState {
   photos: Photo[]                    // مصفوفة الصور (حتى 30,000)
   selectedPhotos: Set<string>        // الصور المحددة
-  currentScreen: Screen              | الشاشة الحالية
+  currentScreen: Screen              // الشاشة الحالية
   activeCategory: string | null      // الفئة النشطة
-  scanComplete: boolean              | حالة الفحص
+  scanComplete: boolean              // حالة الفحص
   // ... + 13 دالة تعديل
 }
 ```
