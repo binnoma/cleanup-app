@@ -2,8 +2,9 @@
 
 import { create } from "zustand";
 
-export type PhotoCategory = "photo" | "screenshot" | "selfie" | "video" | "duplicate" | "similar";
+export type PhotoCategory = "photo" | "screenshot" | "selfie" | "video" | "duplicate" | "similar" | "blurry" | "livephoto" | "old";
 export type Screen = "home" | "import" | "swipe" | "categories" | "results";
+export type CategoryFilter = PhotoCategory | "all" | "allphotos";
 
 export interface PhotoItem {
   id: string;
@@ -16,6 +17,7 @@ export interface PhotoItem {
   category: PhotoCategory;
   kept: boolean;
   deleted: boolean;
+  deleting: boolean; // for immediate visual feedback animation
   duplicateGroupId: string | null;
   color: string;
   date: string;
@@ -27,7 +29,7 @@ interface CleanupStore {
   swipeIndex: number;
   spaceFreed: number;
   deletedCount: number;
-  categoryFilter: PhotoCategory | "all";
+  categoryFilter: CategoryFilter;
   isScanning: boolean;
   isCleaning: boolean;
   demoLoaded: boolean;
@@ -39,7 +41,7 @@ interface CleanupStore {
   markAsDeleted: (id: string) => void;
   deleteSelected: (ids: string[]) => void;
   smartClean: () => void;
-  setCategoryFilter: (filter: PhotoCategory | "all") => void;
+  setCategoryFilter: (filter: CategoryFilter) => void;
   setIsScanning: (val: boolean) => void;
   setIsCleaning: (val: boolean) => void;
   loadDemoPhotos: () => void;
@@ -55,13 +57,14 @@ interface CleanupStore {
     selfies: number;
     largeVideos: number;
     similar: number;
+    blurry: number;
+    livePhotos: number;
+    old: number;
     reclaimable: number;
     keptCount: number;
     deletedCount: number;
   };
 }
-
-const STORAGE_TOTAL = 128 * 1024 * 1024 * 1024; // 128GB
 
 const COLORS = [
   "#EF4444", "#F97316", "#F59E0B", "#84CC16", "#22C55E",
@@ -79,12 +82,18 @@ function generateColor(): string {
   return COLORS[Math.floor(Math.random() * COLORS.length)];
 }
 
+// BLURRY colors: muted, washed-out pastels to simulate blurry photos
+const BLURRY_COLORS = ["#D4D4D4", "#E5E5E5", "#D1D5DB", "#D6D3D1", "#CBD5E1", "#C4B5A0", "#B8C4C0", "#C9C2B0"];
+function generateBlurryColor(): string {
+  return BLURRY_COLORS[Math.floor(Math.random() * BLURRY_COLORS.length)];
+}
+
 function generateDemoPhotos(): PhotoItem[] {
   const photos: PhotoItem[] = [];
   const now = Date.now();
 
-  // Regular photos
-  for (let i = 0; i < 20; i++) {
+  // Regular photos - increased count for larger library feel
+  for (let i = 0; i < 25; i++) {
     const isLandscape = Math.random() > 0.5;
     photos.push({
       id: generateId(),
@@ -97,14 +106,15 @@ function generateDemoPhotos(): PhotoItem[] {
       category: "photo",
       kept: false,
       deleted: false,
+      deleting: false,
       duplicateGroupId: null,
       color: generateColor(),
       date: new Date(now - Math.random() * 90 * 24 * 60 * 60 * 1000).toISOString(),
     });
   }
 
-  // Duplicate groups (3 groups of 2-3 duplicates each)
-  for (let g = 0; g < 3; g++) {
+  // Duplicate groups (4 groups)
+  for (let g = 0; g < 4; g++) {
     const groupId = `dup_group_${g}`;
     const baseSize = Math.floor(Math.random() * 3 * 1024 * 1024) + 1 * 1024 * 1024;
     const baseColor = generateColor();
@@ -121,6 +131,7 @@ function generateDemoPhotos(): PhotoItem[] {
         category: "duplicate",
         kept: false,
         deleted: false,
+        deleting: false,
         duplicateGroupId: groupId,
         color: baseColor,
         date: new Date(now - Math.random() * 30 * 24 * 60 * 60 * 1000).toISOString(),
@@ -128,8 +139,8 @@ function generateDemoPhotos(): PhotoItem[] {
     }
   }
 
-  // Similar photos (2 groups)
-  for (let g = 0; g < 2; g++) {
+  // Similar photos (3 groups)
+  for (let g = 0; g < 3; g++) {
     const groupId = `sim_group_${g}`;
     const baseColor = COLORS[g * 5];
     const count = 3 + Math.floor(Math.random() * 2);
@@ -145,6 +156,7 @@ function generateDemoPhotos(): PhotoItem[] {
         category: "similar",
         kept: false,
         deleted: false,
+        deleting: false,
         duplicateGroupId: groupId,
         color: baseColor,
         date: new Date(now - Math.random() * 60 * 24 * 60 * 60 * 1000).toISOString(),
@@ -153,7 +165,7 @@ function generateDemoPhotos(): PhotoItem[] {
   }
 
   // Screenshots
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 10; i++) {
     photos.push({
       id: generateId(),
       url: "",
@@ -165,6 +177,7 @@ function generateDemoPhotos(): PhotoItem[] {
       category: "screenshot",
       kept: false,
       deleted: false,
+      deleting: false,
       duplicateGroupId: null,
       color: generateColor(),
       date: new Date(now - Math.random() * 60 * 24 * 60 * 60 * 1000).toISOString(),
@@ -172,7 +185,7 @@ function generateDemoPhotos(): PhotoItem[] {
   }
 
   // Selfies
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 8; i++) {
     photos.push({
       id: generateId(),
       url: "",
@@ -184,6 +197,7 @@ function generateDemoPhotos(): PhotoItem[] {
       category: "selfie",
       kept: false,
       deleted: false,
+      deleting: false,
       duplicateGroupId: null,
       color: generateColor(),
       date: new Date(now - Math.random() * 45 * 24 * 60 * 60 * 1000).toISOString(),
@@ -191,7 +205,7 @@ function generateDemoPhotos(): PhotoItem[] {
   }
 
   // Large Videos
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 4; i++) {
     photos.push({
       id: generateId(),
       url: "",
@@ -203,9 +217,70 @@ function generateDemoPhotos(): PhotoItem[] {
       category: "video",
       kept: false,
       deleted: false,
+      deleting: false,
       duplicateGroupId: null,
       color: generateColor(),
       date: new Date(now - Math.random() * 120 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+  }
+
+  // Blurry photos - NEW CATEGORY
+  for (let i = 0; i < 7; i++) {
+    photos.push({
+      id: generateId(),
+      url: "",
+      name: `IMG_${7000 + i}.jpg`,
+      size: Math.floor(Math.random() * 2 * 1024 * 1024) + 200 * 1024,
+      type: "image/jpeg",
+      width: 3024,
+      height: 4032,
+      category: "blurry",
+      kept: false,
+      deleted: false,
+      deleting: false,
+      duplicateGroupId: null,
+      color: generateBlurryColor(),
+      date: new Date(now - Math.random() * 180 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+  }
+
+  // Live Photos - NEW CATEGORY
+  for (let i = 0; i < 5; i++) {
+    photos.push({
+      id: generateId(),
+      url: "",
+      name: `IMG_${8000 + i}_LP.jpg`,
+      size: Math.floor(Math.random() * 3 * 1024 * 1024) + 2 * 1024 * 1024,
+      type: "image/jpeg",
+      width: 3024,
+      height: 4032,
+      category: "livephoto",
+      kept: false,
+      deleted: false,
+      deleting: false,
+      duplicateGroupId: null,
+      color: generateColor(),
+      date: new Date(now - Math.random() * 60 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+  }
+
+  // Old photos (>1 year) - NEW CATEGORY
+  for (let i = 0; i < 6; i++) {
+    photos.push({
+      id: generateId(),
+      url: "",
+      name: `IMG_${9000 + i}.jpg`,
+      size: Math.floor(Math.random() * 2 * 1024 * 1024) + 800 * 1024,
+      type: "image/jpeg",
+      width: 3024,
+      height: 4032,
+      category: "old",
+      kept: false,
+      deleted: false,
+      deleting: false,
+      duplicateGroupId: null,
+      color: generateColor(),
+      date: new Date(now - (365 + Math.random() * 365) * 24 * 60 * 60 * 1000).toISOString(),
     });
   }
 
@@ -234,9 +309,10 @@ export const useCleanupStore = create<CleanupStore>((set, get) => ({
   markAsDeleted: (id) =>
     set((state) => {
       const photo = state.photos.find((p) => p.id === id);
+      if (!photo || photo.deleted) return state;
       return {
         photos: state.photos.map((p) =>
-          p.id === id ? { ...p, deleted: true } : p
+          p.id === id ? { ...p, deleted: true, deleting: false } : p
         ),
         spaceFreed: state.spaceFreed + (photo?.size || 0),
         deletedCount: state.deletedCount + 1,
@@ -244,14 +320,14 @@ export const useCleanupStore = create<CleanupStore>((set, get) => ({
     }),
   deleteSelected: (ids) =>
     set((state) => {
-      const selectedPhotos = state.photos.filter((p) => ids.includes(p.id));
+      const selectedPhotos = state.photos.filter((p) => ids.includes(p.id) && !p.deleted);
       const totalSize = selectedPhotos.reduce((acc, p) => acc + p.size, 0);
       return {
         photos: state.photos.map((p) =>
-          ids.includes(p.id) ? { ...p, deleted: true } : p
+          ids.includes(p.id) ? { ...p, deleted: true, deleting: false } : p
         ),
         spaceFreed: state.spaceFreed + totalSize,
-        deletedCount: state.deletedCount + ids.length,
+        deletedCount: state.deletedCount + selectedPhotos.length,
       };
     }),
   smartClean: () => {
@@ -261,6 +337,11 @@ export const useCleanupStore = create<CleanupStore>((set, get) => ({
     // Delete all screenshots
     state.photos.forEach((p) => {
       if (p.category === "screenshot" && !p.deleted) toDelete.push(p.id);
+    });
+
+    // Delete blurry photos
+    state.photos.forEach((p) => {
+      if (p.category === "blurry" && !p.deleted) toDelete.push(p.id);
     });
 
     // From each duplicate group, keep the first, delete the rest
@@ -303,7 +384,7 @@ export const useCleanupStore = create<CleanupStore>((set, get) => ({
 
     set({
       photos: state.photos.map((p) =>
-        uniqueToDelete.includes(p.id) ? { ...p, deleted: true } : p
+        uniqueToDelete.includes(p.id) ? { ...p, deleted: true, deleting: false } : p
       ),
       spaceFreed: state.spaceFreed + totalSize,
       deletedCount: state.deletedCount + uniqueToDelete.length,
@@ -354,6 +435,9 @@ export const useCleanupStore = create<CleanupStore>((set, get) => ({
       selfies: active.filter((p) => p.category === "selfie").length,
       largeVideos: active.filter((p) => p.category === "video").length,
       similar: active.filter((p) => p.category === "similar").length,
+      blurry: active.filter((p) => p.category === "blurry").length,
+      livePhotos: active.filter((p) => p.category === "livephoto").length,
+      old: active.filter((p) => p.category === "old").length,
       reclaimable: active
         .filter((p) => p.category !== "photo")
         .reduce((acc, p) => acc + p.size, 0),
