@@ -1,0 +1,139 @@
+@import "tailwindcss";
+
+:root {
+  --background: #000000;
+  --foreground: #f5f5f5;
+  --ios-bg: #000000;
+  --ios-card: #1c1c1e;
+  --ios-card-hover: #2c2c2e;
+  --ios-separator: #38383a;
+  --ios-label: #ffffff;
+  --ios-secondary: #8e8e93;
+  --ios-green: #30d158;
+  --ios-red: #ff453a;
+  --ios-blue: #0a84ff;
+  --ios-orange: #ff9f0a;
+  --ios-purple: #bf5af2;
+  --ios-pink: #ff375f;
+  --ios-teal: #64d2ff;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+}
+
+body {
+  background: var(--ios-bg);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
+  overflow-x: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* iOS-style scrollbar */
+::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* iOS blur backdrop */
+.ios-backdrop {
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  background: rgba(0, 0, 0, 0.6);
+}
+
+/* Smooth transitions */
+.ios-transition {
+  transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+/* Card glass effect */
+.glass-card {
+  background: rgba(28, 28, 30, 0.8);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Circular progress */
+@keyframes rotate-circle {
+  from { transform: rotate(-90deg); }
+  to { transform: rotate(270deg); }
+}
+
+/* Pulse animation */
+@keyframes ios-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.05); opacity: 0.8; }
+}
+
+.animate-pulse-ios {
+  animation: ios-pulse 2s ease-in-out infinite;
+}
+
+/* Swipe card */
+.swipe-card {
+  touch-action: none;
+}
+
+/* Photo grid item */
+.photo-grid-item {
+  break-inside: avoid;
+  margin-bottom: 4px;
+}
+
+/* iOS button press effect */
+.ios-press:active {
+  transform: scale(0.97);
+  opacity: 0.7;
+}
+
+/* Storage ring animation */
+@keyframes draw-ring {
+  from { stroke-dashoffset: 440; }
+}
+
+.animate-draw-ring {
+  animation: draw-ring 1.5s ease-out forwards;
+}
+
+/* Shimmer loading */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, transparent 25%, rgba(255,255,255,0.08) 50%, transparent 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* Fade in */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.fade-in-up {
+  animation: fadeInUp 0.4s ease-out forwards;
+}
+
+/* iOS safe area */
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 20px);
+}
+
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
