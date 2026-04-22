@@ -1,16 +1,30 @@
 <div align="center">
 
+<img src="public/cleanup-icon.png" alt="Cleanup Icon" width="120" height="120" />
+
 # 🧹 Cleanup
 
 ### Clean up your device and optimize storage in seconds
 
-**إصنع بـ حب من الإمارات 🇦🇪**
+**صُنع بـ حب من الإمارات 🇦🇪**
 
 [تصميم وتطوير: Binnoma](https://github.com/binnoma)
 
 ---
 
 </div>
+
+## 📱 صور التطبيق
+
+<div align="center">
+
+| شاشة الترحيب | لوحة التحكم | عرض الفئات |
+|:---:|:---:|:---:|
+| <img src="public/screenshot-welcome.png" alt="Welcome Screen" width="250" /> | <img src="public/screenshot-home.png" alt="Home Dashboard" width="250" /> | <img src="public/screenshot-category.png" alt="Category Gallery" width="250" /> |
+
+</div>
+
+---
 
 ## 📖 نبذة عن المشروع
 
@@ -49,12 +63,12 @@ cleanup-app/
 ├── 📄 README.md                 # التوثيق (هذا الملف)
 │
 ├── 📁 public/                   # الملفات الثابتة
+│   ├── cleanup-icon.png         # أيقونة التطبيق
+│   ├── screenshot-welcome.png   # لقطة شاشة الترحيب
+│   ├── screenshot-home.png      # لقطة لوحة التحكم
+│   ├── screenshot-category.png  # لقطة عرض الفئات
 │   ├── favicon.ico
-│   ├── file.svg
-│   ├── globe.svg
-│   ├── next.svg
-│   ├── vercel.svg
-│   └── window.svg
+│   └── *.svg
 │
 └── 📁 src/                      # الكود المصدري
     ├── 📁 app/                  # Next.js App Router
