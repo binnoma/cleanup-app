@@ -28,6 +28,12 @@
 * {
   -webkit-tap-highlight-color: transparent;
   -webkit-touch-callout: none;
+  box-sizing: border-box;
+}
+
+html, body {
+  overscroll-behavior-y: contain;
+  touch-action: manipulation;
 }
 
 body {
@@ -35,8 +41,10 @@ body {
   color: var(--foreground);
   font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
   overflow-x: hidden;
+  overflow-y: auto;
   user-select: none;
   -webkit-user-select: none;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* iOS-style scrollbar */
@@ -136,4 +144,16 @@ body {
 
 .safe-top {
   padding-top: env(safe-area-inset-top, 0px);
+}
+
+/* Smooth scrolling for scrollable containers */
+.overflow-y-auto {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  scroll-behavior: smooth;
+}
+
+/* Fix for mobile scroll issues */
+.overscroll-contain {
+  overscroll-behavior: contain;
 }

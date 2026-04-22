@@ -17,7 +17,14 @@ export interface Photo {
   isSimilar?: boolean
   isLivePhoto?: boolean
   isOld?: boolean
+  isLarge?: boolean
   blurScore?: number
+  nativePath?: string
+  contentUri?: string
+  photoType?: 'image' | 'video'
+  mimeType?: string
+  analyzed?: boolean
+  thumbnailLoaded?: boolean
 }
 
 interface CategoryStats {
@@ -29,15 +36,24 @@ interface CategoryStats {
   color: string
 }
 
+export type ScanPhase = 'idle' | 'requesting' | 'scanning' | 'analyzing' | 'categorizing' | 'done'
+export type AppScreen = 'home' | 'category' | 'swipe' | 'smartClean' | 'results'
+
 interface PhotoState {
   photos: Photo[]
   selectedPhotos: Set<string>
-  currentScreen: 'home' | 'category' | 'swipe' | 'smartClean' | 'results'
+  currentScreen: AppScreen
   activeCategory: string | null
   isLoading: boolean
   scanComplete: boolean
-  maxPhotos: number
+  scanPhase: ScanPhase
+  scanProgress: number
+  scanStatusText: string
+  totalFound: number
+  analyzedCount: number
   hasPermission: boolean
+  isNative: boolean
+  maxPhotos: number
 
   setPhotos: (photos: Photo[]) => void
   addPhotos: (photos: Photo[]) => void
@@ -46,11 +62,19 @@ interface PhotoState {
   selectAll: (ids: string[]) => void
   clearSelection: () => void
   deletePhotos: (ids: string[]) => void
-  setScreen: (screen: PhotoState['currentScreen']) => void
+  setScreen: (screen: AppScreen) => void
   setActiveCategory: (cat: string | null) => void
   setLoading: (loading: boolean) => void
   setScanComplete: (complete: boolean) => void
+  setScanPhase: (phase: ScanPhase) => void
+  setScanProgress: (progress: number) => void
+  setScanStatusText: (text: string) => void
+  setTotalFound: (count: number) => void
+  setAnalyzedCount: (count: number) => void
   setHasPermission: (has: boolean) => void
+  setIsNative: (isNative: boolean) => void
+  updatePhoto: (id: string, updates: Partial<Photo>) => void
+  updatePhotoThumbnail: (contentUri: string, thumbnailUrl: string) => void
   getPhotosByCategory: (category: string) => Photo[]
   getTotalSize: () => number
   getSelectedSize: () => number
@@ -62,11 +86,12 @@ const MAX_PHOTOS = 30000
 
 const CATEGORY_CONFIG: Array<{ id: string; name: string; icon: string; color: string }> = [
   { id: 'duplicates', name: 'Duplicates', icon: 'Copy', color: '#EF4444' },
+  { id: 'similar', name: 'Similar', icon: 'Layers', color: '#3B82F6' },
+  { id: 'blurry', name: 'Blurry', icon: 'Droplet', color: '#6366F1' },
   { id: 'screenshots', name: 'Screenshots', icon: 'Monitor', color: '#F59E0B' },
   { id: 'selfies', name: 'Selfies', icon: 'User', color: '#EC4899' },
   { id: 'videos', name: 'Videos', icon: 'Video', color: '#8B5CF6' },
-  { id: 'similar', name: 'Similar', icon: 'Layers', color: '#3B82F6' },
-  { id: 'blurry', name: 'Blurry', icon: 'Droplet', color: '#6366F1' },
+  { id: 'livePhotos', name: 'Live Photos', icon: 'Camera', color: '#10B981' },
   { id: 'largeFiles', name: 'Large Files', icon: 'HardDrive', color: '#F97316' },
   { id: 'oldPhotos', name: 'Old Photos', icon: 'Clock', color: '#78716C' },
 ]
@@ -80,8 +105,14 @@ export const usePhotoStore = create<PhotoState>()((set, get) => ({
   activeCategory: null,
   isLoading: false,
   scanComplete: false,
-  maxPhotos: MAX_PHOTOS,
+  scanPhase: 'idle',
+  scanProgress: 0,
+  scanStatusText: '',
+  totalFound: 0,
+  analyzedCount: 0,
   hasPermission: false,
+  isNative: false,
+  maxPhotos: MAX_PHOTOS,
 
   setPhotos: (photos: Photo[]) => set({ photos: photos.slice(0, MAX_PHOTOS) }),
 
@@ -112,11 +143,27 @@ export const usePhotoStore = create<PhotoState>()((set, get) => ({
     }))
   },
 
-  setScreen: (screen: PhotoState['currentScreen']) => set({ currentScreen: screen }),
+  setScreen: (screen: AppScreen) => set({ currentScreen: screen }),
   setActiveCategory: (cat: string | null) => set({ activeCategory: cat }),
   setLoading: (loading: boolean) => set({ isLoading: loading }),
   setScanComplete: (complete: boolean) => set({ scanComplete: complete }),
+  setScanPhase: (phase: ScanPhase) => set({ scanPhase: phase }),
+  setScanProgress: (progress: number) => set({ scanProgress: progress }),
+  setScanStatusText: (text: string) => set({ scanStatusText: text }),
+  setTotalFound: (count: number) => set({ totalFound: count }),
+  setAnalyzedCount: (count: number) => set({ analyzedCount: count }),
   setHasPermission: (has: boolean) => set({ hasPermission: has }),
+  setIsNative: (isNative: boolean) => set({ isNative }),
+
+  updatePhoto: (id: string, updates: Partial<Photo>) => set((state) => ({
+    photos: state.photos.map((p: Photo) => p.id === id ? { ...p, ...updates } : p)
+  })),
+
+  updatePhotoThumbnail: (contentUri: string, thumbnailUrl: string) => set((state) => ({
+    photos: state.photos.map((p: Photo) =>
+      p.contentUri === contentUri ? { ...p, url: thumbnailUrl, thumbnailLoaded: true } : p
+    )
+  })),
 
   getPhotosByCategory: (category: string) => {
     const { photos } = get()
@@ -146,5 +193,10 @@ export const usePhotoStore = create<PhotoState>()((set, get) => ({
     activeCategory: null,
     isLoading: false,
     scanComplete: false,
+    scanPhase: 'idle',
+    scanProgress: 0,
+    scanStatusText: '',
+    totalFound: 0,
+    analyzedCount: 0,
   }),
 }))
