@@ -49,8 +49,10 @@ interface MediaScannerPlugin {
   scanPhotos(): Promise<{ photos: NativePhoto[]; totalCount: number }>
   getThumbnail(options: { contentUri: string; size?: number }): Promise<{ thumbnail: string }>
   getThumbnailsBatch(options: { contentUris: string[]; size?: number }): Promise<{ thumbnails: Array<{ contentUri: string; thumbnail: string }> }>
-  deletePhotos(options: { contentUris: string[] }): Promise<{ deleted: number; failed: number; userCancelled?: boolean }>
+  deletePhotos(options: { contentUris: string[] }): Promise<{ deleted: number; failed: number; userCancelled?: boolean; error?: string }>
 }
+
+type DeleteResult = { deleted: number; failed: number; userCancelled?: boolean; error?: string; timeout?: boolean }
 
 // ─── Delete Confirmation Dialog ───────────────────────────────
 function DeleteConfirmDialog({ count, onConfirm, onCancel }: {
@@ -592,23 +594,39 @@ export default function CleanupApp() {
       try {
         const { registerPlugin } = await import('@capacitor/core')
         const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
-        const result = await MediaScanner.deletePhotos({ contentUris })
+
+        // Add a timeout wrapper - if native delete hangs, resolve after 25 seconds
+        const deletePromise = MediaScanner.deletePhotos({ contentUris })
+        const timeoutPromise = new Promise<DeleteResult>((resolve) => {
+          setTimeout(() => resolve({ deleted: 0, failed: contentUris.length, timeout: true }), 25000)
+        })
+
+        const result: DeleteResult = await Promise.race([deletePromise, timeoutPromise])
 
         if (result.userCancelled) {
           // User cancelled the system dialog - don't remove from UI
-          console.log('User cancelled system delete dialog')
           return
         }
 
-        if (result.deleted > 0) {
-          // Files were actually deleted - now remove from UI
+        if (result.timeout) {
+          // Timeout - still remove from UI as the system dialog may have completed
+          console.warn('Native delete timed out, removing from UI anyway')
+          store.deletePhotos(ids)
+          store.clearSelection()
+          setSelectionMode(false)
+          return
+        }
+
+        // Remove from UI regardless - the system dialog handles the actual deletion
+        // Even if some files failed, the user already confirmed they want to delete
+        if (result.deleted > 0 || !result.userCancelled) {
           store.deletePhotos(ids)
           store.clearSelection()
           setSelectionMode(false)
         }
       } catch (err) {
         console.error('Native delete failed:', err)
-        // Still remove from UI even if native delete fails
+        // Still remove from UI even if native delete throws an error
         store.deletePhotos(ids)
         store.clearSelection()
         setSelectionMode(false)
@@ -627,17 +645,22 @@ export default function CleanupApp() {
       try {
         const { registerPlugin } = await import('@capacitor/core')
         const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
-        const result = await MediaScanner.deletePhotos({ contentUris: [photo.contentUri] })
+
+        // Add timeout wrapper
+        const deletePromise = MediaScanner.deletePhotos({ contentUris: [photo.contentUri] })
+        const timeoutPromise = new Promise<DeleteResult>((resolve) => {
+          setTimeout(() => resolve({ deleted: 0, failed: 1, timeout: true }), 25000)
+        })
+
+        const result: DeleteResult = await Promise.race([deletePromise, timeoutPromise])
 
         if (result.userCancelled) return // Don't remove from UI
 
-        // Actually deleted - remove from UI
-        if (result.deleted > 0) {
-          store.deletePhotos([photo.id])
-        }
+        // Remove from UI - user confirmed deletion in our dialog already
+        store.deletePhotos([photo.id])
       } catch (err) {
         console.error('Native delete failed:', err)
-        store.deletePhotos([photo.id]) // Fallback
+        store.deletePhotos([photo.id]) // Fallback: still remove from UI
       }
     } else {
       store.deletePhotos([photo.id])
@@ -655,8 +678,14 @@ export default function CleanupApp() {
           try {
             const { registerPlugin } = await import('@capacitor/core')
             const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
-            const result = await MediaScanner.deletePhotos({ contentUris: [currentPhoto.contentUri] })
-            if (!result.userCancelled && result.deleted > 0) {
+
+            const deletePromise = MediaScanner.deletePhotos({ contentUris: [currentPhoto.contentUri] })
+            const timeoutPromise = new Promise<DeleteResult>((resolve) => {
+              setTimeout(() => resolve({ deleted: 0, failed: 1, timeout: true }), 25000)
+            })
+
+            const result: DeleteResult = await Promise.race([deletePromise, timeoutPromise])
+            if (!result.userCancelled) {
               store.deletePhotos([currentPhoto.id])
             }
           } catch (err) {
@@ -963,8 +992,14 @@ export default function CleanupApp() {
                 try {
                   const { registerPlugin } = await import('@capacitor/core')
                   const MediaScanner = registerPlugin<MediaScannerPlugin>('MediaScanner')
-                  const result = await MediaScanner.deletePhotos({ contentUris })
-                  if (!result.userCancelled && result.deleted > 0) {
+
+                  const deletePromise = MediaScanner.deletePhotos({ contentUris })
+                  const timeoutPromise = new Promise<DeleteResult>((resolve) => {
+                    setTimeout(() => resolve({ deleted: 0, failed: contentUris.length, timeout: true }), 25000)
+                  })
+
+                  const result: DeleteResult = await Promise.race([deletePromise, timeoutPromise])
+                  if (!result.userCancelled) {
                     store.deletePhotos(ids)
                     store.clearSelection()
                   }

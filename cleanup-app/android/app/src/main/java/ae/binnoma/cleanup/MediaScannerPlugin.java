@@ -2,12 +2,16 @@ package ae.binnoma.cleanup;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.RecoverableSecurityException;
 import android.content.ContentResolver;
 import android.content.ContentUris;
+import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
 import android.util.Base64;
 import android.util.Log;
@@ -41,6 +45,10 @@ import java.util.List;
         @Permission(
             alias = "storage",
             strings = { Manifest.permission.READ_EXTERNAL_STORAGE }
+        ),
+        @Permission(
+            alias = "writeStorage",
+            strings = { Manifest.permission.WRITE_EXTERNAL_STORAGE }
         )
     }
 )
@@ -48,9 +56,32 @@ public class MediaScannerPlugin extends Plugin {
 
     private static final String TAG = "MediaScanner";
     private static final int DELETE_REQUEST_CODE = 5001;
+    private static final long DELETE_TIMEOUT_MS = 20000; // 20 seconds timeout
 
-    // Saved call for async operations (activity results)
+    // Static instance for MainActivity to forward results
+    private static MediaScannerPlugin instance;
+
+    // Saved call for async delete operations
     private PluginCall savedDeleteCall = null;
+    private List<Uri> savedDeleteUris = null;
+    private int preDeletedCount = 0;
+    private int preFailedCount = 0;
+    private final Handler timeoutHandler = new Handler(Looper.getMainLooper());
+    private Runnable timeoutRunnable = null;
+
+    @Override
+    public void load() {
+        instance = this;
+        super.load();
+    }
+
+    public static MediaScannerPlugin getInstance() {
+        return instance;
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // PERMISSIONS
+    // ═══════════════════════════════════════════════════════════
 
     @PluginMethod
     public void checkPermissions(PluginCall call) {
@@ -72,7 +103,7 @@ public class MediaScannerPlugin extends Plugin {
         if (Build.VERSION.SDK_INT >= 33) {
             requestPermissionForAliases(new String[]{"mediaImages", "mediaVideo"}, call, "permissionCallback");
         } else {
-            requestPermissionForAlias("storage", call, "permissionCallback");
+            requestPermissionForAliases(new String[]{"storage", "writeStorage"}, call, "permissionCallback");
         }
     }
 
@@ -90,7 +121,8 @@ public class MediaScannerPlugin extends Plugin {
             boolean videoGranted = getPermissionState("mediaVideo") == PermissionState.GRANTED;
             return imagesGranted || videoGranted;
         } else {
-            return getPermissionState("storage") == PermissionState.GRANTED;
+            boolean readGranted = getPermissionState("storage") == PermissionState.GRANTED;
+            return readGranted;
         }
     }
 
@@ -267,8 +299,12 @@ public class MediaScannerPlugin extends Plugin {
 
     /**
      * Delete photos from device storage.
-     * Android 11+: Uses MediaStore.createDeleteRequest() with system consent dialog.
-     * Android 10-: Uses ContentResolver.delete() directly.
+     *
+     * Strategy:
+     * - API 30+ (Android 11+): Try ContentResolver.delete() first for each URI,
+     *   then use MediaStore.createDeleteRequest() for URIs that need user consent.
+     * - API 29 (Android 10): Try ContentResolver.delete() + file system deletion.
+     * - API < 29: Direct ContentResolver.delete() + file system deletion.
      */
     @PluginMethod
     public void deletePhotos(PluginCall call) {
@@ -293,40 +329,10 @@ public class MediaScannerPlugin extends Plugin {
             Log.i(TAG, "deletePhotos called with " + urisToDelete.size() + " URIs, API level: " + Build.VERSION.SDK_INT);
 
             if (Build.VERSION.SDK_INT >= 30) {
-                // Android 11+: Use createDeleteRequest() - MUST save call and run on UI thread
-                call.save(); // CRITICAL: Prevent Capacitor from timing out the call
-                savedDeleteCall = call;
-
-                getActivity().runOnUiThread(() -> {
-                    try {
-                        android.app.PendingIntent deletePendingIntent =
-                            MediaStore.createDeleteRequest(
-                                getContext().getContentResolver(),
-                                urisToDelete
-                            );
-
-                        Log.i(TAG, "createDeleteRequest succeeded, launching intent sender");
-
-                        getActivity().startIntentSenderForResult(
-                            deletePendingIntent.getIntentSender(),
-                            DELETE_REQUEST_CODE,
-                            null, 0, 0, 0
-                        );
-                    } catch (Exception e) {
-                        Log.e(TAG, "createDeleteRequest failed on UI thread", e);
-                        // Resolve with failed status
-                        if (savedDeleteCall != null) {
-                            JSObject result = new JSObject();
-                            result.put("deleted", 0);
-                            result.put("failed", urisToDelete.size());
-                            result.put("error", e.getMessage());
-                            savedDeleteCall.resolve(result);
-                            savedDeleteCall = null;
-                        }
-                    }
-                });
+                // Android 11+: Try direct deletion first, then createDeleteRequest for failures
+                deleteWithConsentFallback(call, urisToDelete);
             } else {
-                // Android 10 and below: Delete directly via ContentResolver
+                // Android 10 and below: Direct deletion
                 deleteDirectly(call, urisToDelete);
             }
         } catch (Exception e) {
@@ -335,33 +341,177 @@ public class MediaScannerPlugin extends Plugin {
         }
     }
 
-    // Handle the result from the system delete confirmation dialog
-    @Override
-    protected void handleOnActivityResult(int requestCode, int resultCode, android.content.Intent data) {
-        Log.i(TAG, "handleOnActivityResult: requestCode=" + requestCode + ", resultCode=" + resultCode);
+    /**
+     * Android 11+ deletion strategy:
+     * 1. Try ContentResolver.delete() for each URI (works for app-owned files)
+     * 2. For URIs that need user consent, use MediaStore.createDeleteRequest()
+     * 3. Properly handle activity result with timeout
+     */
+    private void deleteWithConsentFallback(PluginCall call, List<Uri> urisToDelete) {
+        ContentResolver resolver = getContext().getContentResolver();
+        List<Uri> needConsent = new ArrayList<>();
+        int deleted = 0;
+        int failed = 0;
 
-        if (requestCode == DELETE_REQUEST_CODE && savedDeleteCall != null) {
-            if (resultCode == Activity.RESULT_OK) {
-                // User confirmed - files are deleted by the system
-                Log.i(TAG, "User confirmed deletion - files deleted from device");
-
-                JSObject result = new JSObject();
-                result.put("deleted", 1); // Success
-                result.put("failed", 0);
-                result.put("userCancelled", false);
-                savedDeleteCall.resolve(result);
-            } else {
-                // User cancelled the system dialog
-                Log.i(TAG, "User cancelled system delete dialog");
-
-                JSObject result = new JSObject();
-                result.put("deleted", 0);
-                result.put("failed", 1);
-                result.put("userCancelled", true);
-                savedDeleteCall.resolve(result);
+        // Step 1: Try direct deletion for each URI
+        for (Uri uri : urisToDelete) {
+            try {
+                int rows = resolver.delete(uri, null, null);
+                if (rows > 0) {
+                    deleted++;
+                    Log.i(TAG, "Directly deleted: " + uri);
+                } else {
+                    // No rows deleted - might need consent
+                    needConsent.add(uri);
+                    Log.i(TAG, "No rows deleted, needs consent: " + uri);
+                }
+            } catch (RecoverableSecurityException e) {
+                // Need user consent (API 29+) - catch BEFORE SecurityException since it extends it
+                needConsent.add(uri);
+                Log.i(TAG, "RecoverableSecurityException, needs consent: " + uri);
+            } catch (SecurityException e) {
+                // Need user consent for this URI
+                needConsent.add(uri);
+                Log.i(TAG, "SecurityException, needs consent: " + uri + " - " + e.getMessage());
+            } catch (Exception e) {
+                failed++;
+                Log.w(TAG, "Error deleting " + uri + ": " + e.getMessage());
             }
-            savedDeleteCall = null;
         }
+
+        Log.i(TAG, "Direct deletion: " + deleted + " deleted, " + needConsent.size() + " need consent, " + failed + " failed");
+
+        // Step 2: If no consent needed, we're done
+        if (needConsent.isEmpty()) {
+            JSObject result = new JSObject();
+            result.put("deleted", deleted);
+            result.put("failed", failed);
+            result.put("userCancelled", false);
+            call.resolve(result);
+            return;
+        }
+
+        // Step 3: Use createDeleteRequest() for URIs needing consent
+        call.save();
+        savedDeleteCall = call;
+        savedDeleteUris = needConsent;
+        preDeletedCount = deleted;
+        preFailedCount = failed;
+
+        getActivity().runOnUiThread(() -> {
+            try {
+                android.app.PendingIntent deletePendingIntent =
+                    MediaStore.createDeleteRequest(
+                        getContext().getContentResolver(),
+                        needConsent
+                    );
+
+                Log.i(TAG, "createDeleteRequest succeeded for " + needConsent.size() + " URIs, launching system dialog");
+
+                getActivity().startIntentSenderForResult(
+                    deletePendingIntent.getIntentSender(),
+                    DELETE_REQUEST_CODE,
+                    null, 0, 0, 0
+                );
+
+                // Start timeout in case activity result is never received
+                startDeleteTimeout();
+
+            } catch (Exception e) {
+                Log.e(TAG, "createDeleteRequest failed", e);
+                // Can't get consent - report what we could delete directly
+                resolveDeleteCall(preDeletedCount, preFailedCount + needConsent.size(), false, e.getMessage());
+            }
+        });
+    }
+
+    /**
+     * Start a timeout for the delete request.
+     * If the activity result is never received within the timeout,
+     * we resolve the call with whatever we have.
+     */
+    private void startDeleteTimeout() {
+        cancelDeleteTimeout();
+
+        timeoutRunnable = () -> {
+            if (savedDeleteCall != null) {
+                Log.w(TAG, "Delete request timed out after " + DELETE_TIMEOUT_MS + "ms");
+                int totalUris = savedDeleteUris != null ? savedDeleteUris.size() : 0;
+                resolveDeleteCall(preDeletedCount, preFailedCount + totalUris, false, "Timeout waiting for user consent");
+            }
+        };
+
+        timeoutHandler.postDelayed(timeoutRunnable, DELETE_TIMEOUT_MS);
+    }
+
+    private void cancelDeleteTimeout() {
+        if (timeoutRunnable != null) {
+            timeoutHandler.removeCallbacks(timeoutRunnable);
+            timeoutRunnable = null;
+        }
+    }
+
+    /**
+     * Resolve the saved delete call with the given results.
+     * This is called from handleOnActivityResult, onDeleteResult, and timeout.
+     */
+    private synchronized void resolveDeleteCall(int deleted, int failed, boolean userCancelled, String error) {
+        cancelDeleteTimeout();
+
+        if (savedDeleteCall != null) {
+            Log.i(TAG, "Resolving delete call: deleted=" + deleted + ", failed=" + failed +
+                ", userCancelled=" + userCancelled + ", error=" + error);
+
+            JSObject result = new JSObject();
+            result.put("deleted", deleted);
+            result.put("failed", failed);
+            result.put("userCancelled", userCancelled);
+            if (error != null) {
+                result.put("error", error);
+            }
+            savedDeleteCall.resolve(result);
+            savedDeleteCall = null;
+            savedDeleteUris = null;
+            preDeletedCount = 0;
+            preFailedCount = 0;
+        }
+    }
+
+    /**
+     * Called by MainActivity.onActivityResult to forward results.
+     * Also called by handleOnActivityResult from Capacitor bridge.
+     */
+    public void onDeleteResult(int requestCode, int resultCode, Intent data) {
+        Log.i(TAG, "onDeleteResult: requestCode=" + requestCode + ", resultCode=" + resultCode +
+            " (RESULT_OK=" + Activity.RESULT_OK + ", RESULT_CANCELED=" + Activity.RESULT_CANCELED + ")");
+
+        if (requestCode != DELETE_REQUEST_CODE) return;
+        if (savedDeleteCall == null) {
+            Log.w(TAG, "onDeleteResult: no saved delete call");
+            return;
+        }
+
+        int consentUrisCount = savedDeleteUris != null ? savedDeleteUris.size() : 0;
+
+        if (resultCode == Activity.RESULT_OK) {
+            // User confirmed - files are deleted by the system
+            Log.i(TAG, "User confirmed deletion - " + consentUrisCount + " files deleted from device");
+            resolveDeleteCall(preDeletedCount + consentUrisCount, preFailedCount, false, null);
+        } else {
+            // User cancelled or dialog dismissed
+            Log.i(TAG, "User cancelled system delete dialog or dialog dismissed (resultCode=" + resultCode + ")");
+            resolveDeleteCall(preDeletedCount, preFailedCount + consentUrisCount, true, null);
+        }
+    }
+
+    /**
+     * Handle activity result from Capacitor bridge.
+     * This is the standard Capacitor way - might or might not be called depending on Capacitor version.
+     */
+    @Override
+    protected void handleOnActivityResult(int requestCode, int resultCode, Intent data) {
+        Log.i(TAG, "handleOnActivityResult: requestCode=" + requestCode + ", resultCode=" + resultCode);
+        onDeleteResult(requestCode, resultCode, data);
     }
 
     /**
@@ -375,7 +525,15 @@ public class MediaScannerPlugin extends Plugin {
 
             for (Uri uri : urisToDelete) {
                 try {
-                    // First, try to delete the actual file from storage
+                    // First, try ContentResolver.delete()
+                    int rows = resolver.delete(uri, null, null);
+                    if (rows > 0) {
+                        deleted++;
+                        Log.i(TAG, "Deleted from MediaStore: " + uri);
+                        continue;
+                    }
+
+                    // If ContentResolver didn't work, try file system deletion
                     String filePath = getFilePathFromUri(uri);
                     boolean fileDeleted = false;
 
@@ -387,17 +545,34 @@ public class MediaScannerPlugin extends Plugin {
                         }
                     }
 
-                    // Then remove from MediaStore database
-                    int rows = resolver.delete(uri, null, null);
-                    if (rows > 0 || fileDeleted) {
+                    if (fileDeleted) {
+                        // Also try to remove from MediaStore database
+                        try {
+                            resolver.delete(uri, null, null);
+                        } catch (Exception e) {
+                            // Ignore - file is already deleted
+                        }
                         deleted++;
-                        Log.i(TAG, "Deleted from MediaStore: " + uri);
                     } else {
                         failed++;
-                        Log.w(TAG, "Failed to delete: " + uri + " (rows=" + rows + ", fileDeleted=" + fileDeleted + ")");
+                        Log.w(TAG, "Failed to delete: " + uri);
                     }
                 } catch (SecurityException e) {
                     Log.w(TAG, "SecurityException for " + uri + ": " + e.getMessage());
+                    // On API 29, try file system as fallback
+                    try {
+                        String filePath = getFilePathFromUri(uri);
+                        if (filePath != null) {
+                            File file = new File(filePath);
+                            if (file.exists() && file.delete()) {
+                                deleted++;
+                                Log.i(TAG, "Deleted via file system fallback: " + filePath);
+                                continue;
+                            }
+                        }
+                    } catch (Exception ex) {
+                        // Ignore
+                    }
                     failed++;
                 } catch (Exception e) {
                     Log.w(TAG, "Exception deleting " + uri + ": " + e.getMessage());
@@ -408,7 +583,6 @@ public class MediaScannerPlugin extends Plugin {
             final int finalDeleted = deleted;
             final int finalFailed = failed;
 
-            // Return result on main thread
             getActivity().runOnUiThread(() -> {
                 JSObject result = new JSObject();
                 result.put("deleted", finalDeleted);
