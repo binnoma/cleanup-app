@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Cleanup</string>
+    <string name="title_activity_main">Cleanup</string>
+    <string name="package_name">ae.binnoma.cleanup</string>
+    <string name="custom_url_scheme">ae.binnoma.cleanup</string>
+</resources>
